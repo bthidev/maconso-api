@@ -10,13 +10,13 @@ packages = [
 
 [tool.poetry.dependencies]
 python = "^3.11"
-requests = "^2.32.3"
-influxdb-client = "^1.49.0"
-pandas = "^2.3.0"
-python-dotenv = "^1.0.0"
+requests = "*"
+influxdb-client = "*"
+pandas = "*"
+python-dotenv = "*"
 
 [tool.poetry.group.dev.dependencies]
-ruff = "^0.1.0"
+ruff = "*"
 # Add other development dependencies here if needed
 
 [tool.poetry.scripts]

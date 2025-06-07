@@ -20,8 +20,12 @@ COPY pyproject.toml poetry.lock* ./
 RUN poetry config virtualenvs.create false \
     && poetry config virtualenvs.in-project false
 
-# Install dependencies
-RUN poetry install --only=main --no-root
+# Install dependencies (handle missing lock file gracefully)
+RUN if [ -f poetry.lock ]; then \
+        poetry install --only=main --no-root; \
+    else \
+        poetry install --only=main --no-root --no-cache; \
+    fi
 
 # Production stage
 FROM python:3.11-slim
@@ -60,61 +64,57 @@ RUN mkdir -p /var/log/maconso \
     && chown -R maconso:maconso /var/log/maconso
 
 # Create cron job file
-COPY <<EOF /etc/cron.d/maconso-pipeline
-# Energy data pipeline cron job
-0 2 * * * maconso cd /app && python -m src.pipeline >> /var/log/maconso/pipeline.log 2>&1
-
-EOF
+RUN echo "# Energy data pipeline cron job" > /etc/cron.d/maconso-pipeline \
+    && echo "0 2 * * * maconso cd /app && python -m src.pipeline >> /var/log/maconso/pipeline.log 2>&1" >> /etc/cron.d/maconso-pipeline \
+    && echo "" >> /etc/cron.d/maconso-pipeline
 
 # Set proper permissions for cron file
 RUN chmod 0644 /etc/cron.d/maconso-pipeline \
     && crontab /etc/cron.d/maconso-pipeline
 
 # Create entrypoint script with proper error handling
-COPY <<'EOF' /entrypoint.sh
-#!/bin/bash
-set -euo pipefail
-
-# Function to handle shutdown gracefully
-cleanup() {
-    echo "Shutting down gracefully..."
-    pkill -TERM cron || true
-    exit 0
-}
-
-# Set up signal handlers
-trap cleanup SIGTERM SIGINT
-
-# Start cron daemon
-echo "Starting cron daemon..."
-cron
-
-# Run pipeline once on startup if requested
-if [[ "${RUN_ON_STARTUP:-false}" == "true" ]]; then
-    echo "Running pipeline on startup..."
-    cd /app && python -m src.pipeline || echo "Startup run failed, continuing..."
-fi
-
-# Show configuration
-echo "===== Maconso Energy Pipeline ====="
-echo "Scheduled to run daily at 2 AM UTC"
-echo "Logs: /var/log/maconso/pipeline.log"
-echo "Timezone: $(cat /etc/timezone 2>/dev/null || echo 'UTC')"
-echo "Container is running... Press Ctrl+C to stop"
-echo "===================================="
-
-# Create initial log file if it doesn't exist
-touch /var/log/maconso/pipeline.log
-chown maconso:maconso /var/log/maconso/pipeline.log
-
-# Follow logs in background
-tail -f /var/log/maconso/pipeline.log &
-
-# Keep container alive and wait for signals
-while true; do
-    sleep 30
-done
-EOF
+RUN echo '#!/bin/bash' > /entrypoint.sh \
+    && echo 'set -euo pipefail' >> /entrypoint.sh \
+    && echo '' >> /entrypoint.sh \
+    && echo '# Function to handle shutdown gracefully' >> /entrypoint.sh \
+    && echo 'cleanup() {' >> /entrypoint.sh \
+    && echo '    echo "Shutting down gracefully..."' >> /entrypoint.sh \
+    && echo '    pkill -TERM cron || true' >> /entrypoint.sh \
+    && echo '    exit 0' >> /entrypoint.sh \
+    && echo '}' >> /entrypoint.sh \
+    && echo '' >> /entrypoint.sh \
+    && echo '# Set up signal handlers' >> /entrypoint.sh \
+    && echo 'trap cleanup SIGTERM SIGINT' >> /entrypoint.sh \
+    && echo '' >> /entrypoint.sh \
+    && echo '# Start cron daemon' >> /entrypoint.sh \
+    && echo 'echo "Starting cron daemon..."' >> /entrypoint.sh \
+    && echo 'cron' >> /entrypoint.sh \
+    && echo '' >> /entrypoint.sh \
+    && echo '# Run pipeline once on startup if requested' >> /entrypoint.sh \
+    && echo 'if [[ "${RUN_ON_STARTUP:-false}" == "true" ]]; then' >> /entrypoint.sh \
+    && echo '    echo "Running pipeline on startup..."' >> /entrypoint.sh \
+    && echo '    cd /app && python -m src.pipeline || echo "Startup run failed, continuing..."' >> /entrypoint.sh \
+    && echo 'fi' >> /entrypoint.sh \
+    && echo '' >> /entrypoint.sh \
+    && echo '# Show configuration' >> /entrypoint.sh \
+    && echo 'echo "===== Maconso Energy Pipeline ====="' >> /entrypoint.sh \
+    && echo 'echo "Scheduled to run daily at 2 AM UTC"' >> /entrypoint.sh \
+    && echo 'echo "Logs: /var/log/maconso/pipeline.log"' >> /entrypoint.sh \
+    && echo 'echo "Timezone: $(cat /etc/timezone 2>/dev/null || echo '\''UTC'\'')"' >> /entrypoint.sh \
+    && echo 'echo "Container is running... Press Ctrl+C to stop"' >> /entrypoint.sh \
+    && echo 'echo "===================================="' >> /entrypoint.sh \
+    && echo '' >> /entrypoint.sh \
+    && echo '# Create initial log file if it doesn'\''t exist' >> /entrypoint.sh \
+    && echo 'touch /var/log/maconso/pipeline.log' >> /entrypoint.sh \
+    && echo 'chown maconso:maconso /var/log/maconso/pipeline.log' >> /entrypoint.sh \
+    && echo '' >> /entrypoint.sh \
+    && echo '# Follow logs in background' >> /entrypoint.sh \
+    && echo 'tail -f /var/log/maconso/pipeline.log &' >> /entrypoint.sh \
+    && echo '' >> /entrypoint.sh \
+    && echo '# Keep container alive and wait for signals' >> /entrypoint.sh \
+    && echo 'while true; do' >> /entrypoint.sh \
+    && echo '    sleep 30' >> /entrypoint.sh \
+    && echo 'done' >> /entrypoint.sh
 
 RUN chmod +x /entrypoint.sh
 
