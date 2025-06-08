@@ -8,6 +8,7 @@ import logging
 import os
 import requests
 from datetime import datetime, timedelta
+from typing import Set, Tuple
 
 from influxdb_client import InfluxDBClient, Point, WritePrecision
 from influxdb_client.client.write_api import SYNCHRONOUS
@@ -92,8 +93,8 @@ class SimpleDailyPipeline:
             logger.error(f"Failed to connect to InfluxDB: {e}")
             return False
 
-    def has_data_for_date(self, date: datetime) -> bool:
-        """Check if data already exists for the given date"""
+    def get_existing_timestamps_for_date(self, date: datetime) -> Set[str]:
+        """Get all existing timestamps for the given date from InfluxDB"""
         try:
             start_time = date.strftime("%Y-%m-%dT00:00:00Z")
             end_time = (date + timedelta(days=1)).strftime("%Y-%m-%dT00:00:00Z")
@@ -103,24 +104,27 @@ class SimpleDailyPipeline:
               |> range(start: {start_time}, stop: {end_time})
               |> filter(fn: (r) => r["_measurement"] == "energy_consumption")
               |> filter(fn: (r) => r["_field"] == "power")
-              |> count()
+              |> filter(fn: (r) => r["usage_point_id"] == "{USAGE_POINT_ID}")
+              |> keep(columns: ["_time"])
             '''
 
             tables = self.query_api.query(query, org=INFLUXDB_ORG)
+            existing_timestamps = set()
 
             for table in tables:
                 for record in table.records:
-                    count = record.get_value()
-                    if count and count > 0:
-                        logger.info(f"Found {count} existing records for {date.date()}")
-                        return True
+                    timestamp = record.get_time()
+                    if timestamp:
+                        # Convert to the same format used in API data
+                        timestamp_str = timestamp.strftime("%Y-%m-%d %H:%M:%S")
+                        existing_timestamps.add(timestamp_str)
 
-            logger.info(f"No existing data found for {date.date()}")
-            return False
+            logger.info(f"Found {len(existing_timestamps)} existing records for {date.date()}")
+            return existing_timestamps
 
         except Exception as e:
-            logger.warning(f"Could not check existing data for {date.date()}: {e}")
-            return False
+            logger.warning(f"Could not fetch existing data for {date.date()}: {e}")
+            return set()
 
     def fetch_yesterday_data(self) -> tuple[dict | None, datetime | None]:
         """Fetch yesterday's data from API"""
@@ -157,17 +161,30 @@ class SimpleDailyPipeline:
             logger.error(f"Failed to parse JSON response: {e}")
             return None, None
 
-    def convert_to_influx_points(self, data: dict) -> list[Point]:
-        """Convert API data to InfluxDB points"""
+    def convert_to_influx_points(self, data: dict, existing_timestamps: Set[str]) -> Tuple[list[Point], int, int]:
+        """
+        Convert API data to InfluxDB points, filtering out existing timestamps
+        Returns: (points_to_insert, total_api_records, skipped_existing_records)
+        """
         if not data or "interval_reading" not in data:
-            return []
+            return [], 0, 0
 
         points = []
+        total_records = 0
+        skipped_records = 0
 
         for reading in data["interval_reading"]:
+            total_records += 1
             try:
                 # Parse timestamp
-                timestamp = datetime.strptime(reading["date"], "%Y-%m-%d %H:%M:%S")
+                timestamp_str = reading["date"]
+                timestamp = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S")
+
+                # Check if this timestamp already exists
+                if timestamp_str in existing_timestamps:
+                    skipped_records += 1
+                    logger.debug(f"Skipping existing record for {timestamp_str}")
+                    continue
 
                 # Parse value
                 value = float(reading["value"])
@@ -188,19 +205,19 @@ class SimpleDailyPipeline:
                 logger.warning(f"Skipping invalid reading: {e}")
                 continue
 
-        return points
+        return points, total_records, skipped_records
 
     def write_to_influxdb(self, points: list[Point]) -> bool:
         """Write points to InfluxDB"""
         if not points:
-            logger.info("No data points to write")
+            logger.info("No new data points to write")
             return True
 
         try:
             self.write_api.write(
                 bucket=INFLUXDB_BUCKET, org=INFLUXDB_ORG, record=points
             )
-            logger.info(f"Successfully wrote {len(points)} points to InfluxDB")
+            logger.info(f"Successfully wrote {len(points)} new points to InfluxDB")
             return True
 
         except Exception as e:
@@ -220,12 +237,8 @@ class SimpleDailyPipeline:
             yesterday = datetime.now() - timedelta(days=1)
             yesterday = yesterday.replace(hour=0, minute=0, second=0, microsecond=0)
 
-            # Check if data already exists
-            if self.has_data_for_date(yesterday):
-                logger.info(
-                    f"Data for {yesterday.date()} already exists in InfluxDB. Skipping."
-                )
-                return True
+            # Get existing timestamps from InfluxDB
+            existing_timestamps = self.get_existing_timestamps_for_date(yesterday)
 
             # Fetch data from API
             data, date = self.fetch_yesterday_data()
@@ -233,18 +246,23 @@ class SimpleDailyPipeline:
                 logger.error("Failed to fetch data from API")
                 return False
 
-            # Convert to InfluxDB points
-            points = self.convert_to_influx_points(data)
-            if not points:
-                logger.warning("No valid data points to import")
-                return False
+            # Convert to InfluxDB points, filtering out existing data
+            points, total_api_records, skipped_records = self.convert_to_influx_points(data, existing_timestamps)
+            
+            logger.info(f"API returned {total_api_records} records")
+            logger.info(f"Skipped {skipped_records} existing records")
+            logger.info(f"Found {len(points)} new records to import")
 
-            # Write to InfluxDB
+            if not points:
+                logger.info("No new data to import - all records already exist in InfluxDB")
+                return True
+
+            # Write new points to InfluxDB
             success = self.write_to_influxdb(points)
 
             if success:
                 logger.info(
-                    f"Successfully imported {len(points)} data points for {date.date()}"
+                    f"Successfully imported {len(points)} new data points for {date.date()}"
                 )
 
             return success
