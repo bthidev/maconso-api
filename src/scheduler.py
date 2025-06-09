@@ -60,12 +60,12 @@ class PipelineScheduler:
     def start(self, run_on_startup=False):
         """Start the scheduler"""
         logger.info("===== Maconso Energy Pipeline Scheduler =====")
-        logger.info("Scheduled to run daily at 2:00 AM UTC")
+        logger.info("Scheduled to run daily at 10:30 AM UTC")
         logger.info("Logs: /var/log/maconso/scheduler.log")
         logger.info("============================================")
         
         # Schedule the job for 2:00 AM daily
-        schedule.every().day.at("02:00").do(self.run_pipeline)
+        schedule.every().day.at("10:30").do(self.run_pipeline)
         
         # Run once on startup if requested
         if run_on_startup:
